@@ -382,18 +382,20 @@ async function initCloud(){
   cloudStatus('Connecting…');
   try{
     const appMod  = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
-    const authMod = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js');
     const fsMod   = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
     const app = appMod.getApps && appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(FIREBASE_CONFIG);
-    const auth = authMod.getAuth(app);
-    await authMod.signInAnonymously(auth);
     const db = fsMod.getFirestore(app);
     cloud.fs=fsMod; cloud.db=db; cloud.code=code; cloud.on=true; cloud.ready=true;
     const ref = fsMod.doc(db,'scorebooks',code);
     fsMod.onSnapshot(ref, snap=>{ handleSnapshot(snap.data(), snap.metadata.hasPendingWrites); },
       err=>{ cloudStatus('Sync error'); console.warn('[cloud]',err); });
     cloudStatus('Connected ✓');
-  }catch(e){ cloud.on=false; cloudStatus('Connect failed'); console.warn('[cloud]',e); }
+  }catch(e){
+    cloud.on=false;
+    const reason=(e && (e.code || e.message)) ? String(e.code||e.message) : 'unknown error';
+    cloudStatus('Connect failed: '+reason);
+    console.warn('[cloud]',e);
+  }
 }
 // Decide what to do with a cloud snapshot. Returns an action label (handy for tests).
 function handleSnapshot(data, hasPendingWrites){
