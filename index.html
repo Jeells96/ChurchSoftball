@@ -335,6 +335,8 @@ const FIREBASE_CONFIG = {
 /* ---------- State ---------- */
 const KEY='softball_scorebook_v1';
 const THIS_YEAR=new Date().getFullYear();
+const DEFAULT_LEAGUE_CODE='church-softball-main';   // fixed shared doc — sync just works, no setup
+const syncCode = () => (DB.meta.leagueCode && DB.meta.leagueCode.trim()) || DEFAULT_LEAGUE_CODE;
 let DB = load();
 let ui = { tab:'games', gameId:null, scoreSide:'away', statScope:'career', statTeam:'all', statSort:{col:'avg',dir:-1}, statView:'batting' };
 
@@ -366,8 +368,7 @@ function cloudConfigured(){ return !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey 
 function cloudStatus(s){ cloud.status=s; const el=$('#cloudStatus'); if(el) el.textContent=s; }
 async function initCloud(){
   if(!cloudConfigured()){ cloudStatus('No config'); return; }
-  const code=(DB.meta.leagueCode||'').trim();
-  if(!code){ cloudStatus('Set a league code'); return; }
+  const code=syncCode();
   cloudStatus('Connecting…');
   try{
     const appMod  = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
@@ -1066,8 +1067,8 @@ function openSettings(){
   // cloud status text
   const cfg=cloudConfigured();
   const cloudLine = !cfg
-      ? 'Add your Firebase config in the code to enable cloud sync, then set a league code here.'
-      : (DB.meta.leagueCode? 'Config detected. Everyone using the same league code shares this scorebook.' : 'Config detected. Set a league code to start syncing.');
+      ? 'Add your Firebase config in the code to turn on cloud sync.'
+      : 'Syncing automatically. Every device running this app shares one scorebook — no setup needed.';
 
   openSheet(`<h2>Settings</h2><div class="sh-sub">League, season, schedule & sync.</div>
 
@@ -1110,11 +1111,10 @@ function openSettings(){
 
     <div class="group-label">Cloud sync</div>
     <div class="hint">${cloudLine}</div>
-    <div class="row" style="gap:6px;margin-top:8px">
-      <label class="field grow" style="margin:0"><span>League code (shared)</span><input class="inp" id="stCode" value="${esc(DB.meta.leagueCode||'')}" placeholder="e.g. grace-2026"></label>
-      <button class="btn ${cfg?'seam':'ghost'} sm" style="align-self:flex-end" onclick="saveLeagueCode()">${cloud.on?'Reconnect':'Connect'}</button>
+    <div class="row" style="margin-top:10px;gap:8px;align-items:center">
+      <span class="pill">Status: <b id="cloudStatus" style="margin-left:4px">${esc(cloud.status==='off'?(cfg?'Starting…':'Offline (no config)'):cloud.status)}</b></span>
+      ${cfg?`<button class="btn ghost sm" onclick="reconnectCloud()">Reconnect</button>`:''}
     </div>
-    <div class="row" style="margin-top:6px"><span class="pill">Status: <b id="cloudStatus" style="margin-left:4px">${esc(cloud.status==='off'?(cfg?(DB.meta.leagueCode?'Ready':'Set a league code'):'Offline (no config)'):cloud.status)}</b></span></div>
 
     <div class="group-label">Backup</div>
     <div class="hint">Data lives on this device. Export a backup before clearing your browser or moving phones.</div>
@@ -1165,11 +1165,9 @@ function genRoundRobin(){
 }
 
 /* cloud */
-function saveLeagueCode(){
-  DB.meta.leagueCode=$('#stCode').value.trim(); save();
+function reconnectCloud(){
   if(!cloudConfigured()){ cloudStatus('No config'); toast('Add Firebase config in the code first'); return; }
-  if(!DB.meta.leagueCode){ cloudStatus('Set a league code'); toast('Enter a league code'); return; }
-  cloud.on=false; cloud.ready=false; initCloud();
+  cloud.on=false; cloud.ready=false; cloudStatus('Connecting…'); initCloud();
 }
 
 function exportBackup(){ download('scorebook_backup_'+new Date().toISOString().slice(0,10)+'.json', JSON.stringify(DB,null,2)); }
@@ -1193,7 +1191,7 @@ function download(name,text){
 
 /* ---------- boot ---------- */
 render();
-if(cloudConfigured() && DB.meta.leagueCode) initCloud();
+if(cloudConfigured()) initCloud();   // auto-sync, no setup needed
 </script>
 </body>
 </html>
