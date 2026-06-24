@@ -363,12 +363,22 @@ const curSeason = () => DB.meta.season || THIS_YEAR;
 
 /* ---------- Cloud sync (Firebase Firestore, optional) ---------- */
 let cloud = { on:false, ready:false, db:null, fs:null, code:null, writer:uid('w'),
-              applyingRemote:false, timer:null, status:'off' };
+              applyingRemote:false, timer:null, status:'off',
+              hydrated:false,        // true once we've seen what's in the cloud
+              remoteWeight:0 };      // how much data the cloud currently holds
 function cloudConfigured(){ return !!(FIREBASE_CONFIG && FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId); }
 function cloudStatus(s){ cloud.status=s; const el=$('#cloudStatus'); if(el) el.textContent=s; }
+// a rough measure of "how much is in here" — used to protect against blank overwrites
+function dataWeight(d){
+  if(!d) return 0;
+  let w=(d.teams?d.teams.length:0)+(d.players?d.players.length:0)+(d.games?d.games.length:0);
+  (d.games||[]).forEach(g=>{ w+=Object.keys(g.pa||{}).length; });
+  return w;
+}
 async function initCloud(){
   if(!cloudConfigured()){ cloudStatus('No config'); return; }
   const code=syncCode();
+  cloud.hydrated=false;
   cloudStatus('Connecting…');
   try{
     const appMod  = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
@@ -380,28 +390,54 @@ async function initCloud(){
     const db = fsMod.getFirestore(app);
     cloud.fs=fsMod; cloud.db=db; cloud.code=code; cloud.on=true; cloud.ready=true;
     const ref = fsMod.doc(db,'scorebooks',code);
-    fsMod.onSnapshot(ref, snap=>{
-      if(snap.metadata.hasPendingWrites) return;          // ignore our own optimistic write
-      const data=snap.data();
-      if(!data || !data.payload){ pushCloud(); return; }   // nothing there yet → seed it
-      if(data.writer===cloud.writer) return;               // our own confirmed write
-      try{
-        cloud.applyingRemote=true;
-        DB = migrate(JSON.parse(data.payload));
-        saveLocal(); render();
-        cloudStatus('Synced ✓');
-      }catch(e){} finally{ cloud.applyingRemote=false; }
-    }, err=>{ cloudStatus('Sync error'); console.warn('[cloud]',err); });
+    fsMod.onSnapshot(ref, snap=>{ handleSnapshot(snap.data(), snap.metadata.hasPendingWrites); },
+      err=>{ cloudStatus('Sync error'); console.warn('[cloud]',err); });
     cloudStatus('Connected ✓');
   }catch(e){ cloud.on=false; cloudStatus('Connect failed'); console.warn('[cloud]',e); }
 }
+// Decide what to do with a cloud snapshot. Returns an action label (handy for tests).
+function handleSnapshot(data, hasPendingWrites){
+  // (1) Cloud has nothing yet.
+  if(!data || !data.payload){
+    cloud.remoteWeight=0; cloud.hydrated=true;
+    if(dataWeight(DB)>0){ pushCloud(); return 'seed'; }
+    cloudStatus('Connected ✓'); return 'empty-wait';
+  }
+  // (2) Our own write echoing back — don't re-apply, just note the cloud weight.
+  if(hasPendingWrites || data.writer===cloud.writer){
+    cloud.hydrated=true; cloud.remoteWeight=dataWeight(DB);
+    return 'self-echo';
+  }
+  // (3) A real update from the cloud / another device.
+  try{
+    const remote=migrate(JSON.parse(data.payload));
+    const rw=dataWeight(remote), lw=dataWeight(DB);
+    // PROTECTION: never accept a blank cloud over a device that has data.
+    if(rw===0 && lw>0){
+      cloud.hydrated=true; cloudStatus('Protected — restored from this device');
+      pushCloud(); return 'protect-restore';
+    }
+    cloud.applyingRemote=true;
+    DB=remote; saveLocal(); render();
+    cloud.remoteWeight=rw; cloud.hydrated=true; cloudStatus('Synced ✓');
+    return 'adopt';
+  }catch(e){ cloud.hydrated=true; console.warn('[cloud] parse',e); return 'parse-error'; }
+  finally{ cloud.applyingRemote=false; }
+}
 function pushCloud(){
   if(!cloud.on || !cloud.ready) return;
+  if(!cloud.hydrated) return;                            // never write before we've seen the cloud
+  // HARD GUARD: a device with no data must never overwrite a cloud that has data.
+  if(dataWeight(DB)===0 && cloud.remoteWeight>0){
+    cloudStatus('Empty here — cloud left untouched');
+    return;
+  }
   clearTimeout(cloud.timer);
   cloud.timer=setTimeout(async ()=>{
     try{
       const ref=cloud.fs.doc(cloud.db,'scorebooks',cloud.code);
       await cloud.fs.setDoc(ref,{ payload:JSON.stringify(DB), writer:cloud.writer, updated:Date.now() });
+      cloud.remoteWeight=dataWeight(DB);
       cloudStatus('Saved to cloud ✓');
     }catch(e){ cloudStatus('Cloud write failed'); console.warn('[cloud]',e); }
   },600);
@@ -1068,7 +1104,7 @@ function openSettings(){
   const cfg=cloudConfigured();
   const cloudLine = !cfg
       ? 'Add your Firebase config in the code to turn on cloud sync.'
-      : 'Syncing automatically. Every device running this app shares one scorebook — no setup needed.';
+      : 'Syncing automatically. Every device running this app shares one scorebook. A device with no data can never overwrite the cloud.';
 
   openSheet(`<h2>Settings</h2><div class="sh-sub">League, season, schedule & sync.</div>
 
@@ -1179,9 +1215,13 @@ function importBackup(){
   inp.click();
 }
 function clearAllData(){
-  if(!confirm('Erase all teams, players, games and stats on this device? Export a backup first if you want to keep them.')) return;
-  if(!confirm('Are you sure? This cannot be undone.')) return;
-  DB=blankDB(); save(); closeSheet(); ui.tab='games'; ui.gameId=null; render(); toast('Cleared');
+  const synced = cloud.on;
+  const msg = synced
+    ? 'Erase everything on THIS device? Because you’re synced, the shared cloud copy is protected and your data will reload from the cloud. To truly start over you’d clear every device.'
+    : 'Erase all teams, players, games and stats on this device? Export a backup first if you want to keep them.';
+  if(!confirm(msg)) return;
+  if(!confirm('Are you sure?')) return;
+  DB=blankDB(); saveLocal(); closeSheet(); ui.tab='games'; ui.gameId=null; render(); toast('Cleared on this device');
 }
 function download(name,text){
   const blob=new Blob([text],{type:'text/plain'}); const url=URL.createObjectURL(blob);
