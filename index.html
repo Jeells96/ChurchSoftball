@@ -252,6 +252,23 @@
   .seg button.active{background:var(--field);color:var(--chalk);}
   .hint{font-size:12px;color:var(--ink-soft);line-height:1.4;margin-top:6px;}
   .danger{color:var(--seam);}
+
+  /* featured active game card */
+  .card.feat{border:2px solid var(--field);box-shadow:0 6px 18px rgba(31,77,58,.18);}
+  .feat-status{background:var(--field);color:var(--chalk);font-size:13px;letter-spacing:.14em;text-transform:uppercase;font-weight:600;padding:8px 14px;}
+  .feat-status.fin{background:var(--seam);}
+  .feat-body{padding:8px 16px 4px;}
+  .feat-team{display:flex;align-items:center;padding:7px 0;border-bottom:1px solid var(--grid-soft);}
+  .feat-team:last-child{border-bottom:none;}
+  .ft-name{flex:1;font-size:20px;font-weight:600;letter-spacing:.01em;}
+  .ft-score{font-size:26px;font-weight:700;color:var(--field);}
+  .feat-foot{display:flex;align-items:center;gap:8px;padding:10px 16px 14px;}
+  .diff-chip{font-size:11px;font-weight:700;letter-spacing:.04em;color:#fff;background:var(--seam);padding:3px 8px;border-radius:6px;}
+
+  /* discrepancy banners + cell highlight */
+  .discrep{background:#fbe7e4;border:1.5px solid var(--seam);color:#7d1a14;border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.35;margin-bottom:10px;letter-spacing:.01em;}
+  .agree{background:#e7f1ea;border:1px solid #bcd3c4;color:#205a40;border-radius:10px;padding:8px 12px;font-size:12.5px;margin-bottom:10px;}
+  td.cell-diff{background:var(--seam)!important;color:#fff!important;box-shadow:inset 0 0 0 2px #fff;font-weight:700;}
 </style>
 </head>
 <body>
@@ -260,7 +277,7 @@
     <div class="brand">
       <div class="seam-ball"></div>
       <div style="min-width:0">
-        <div class="sub" id="leagueSub">Church Softball</div>
+        <div class="sub" id="leagueSub">Softball League</div>
         <h1 id="leagueName">League Scorebook</h1>
       </div>
     </div>
@@ -338,18 +355,30 @@ const THIS_YEAR=new Date().getFullYear();
 const DEFAULT_LEAGUE_CODE='church-softball-main';   // fixed shared doc — sync just works, no setup
 const syncCode = () => (DB.meta.leagueCode && DB.meta.leagueCode.trim()) || DEFAULT_LEAGUE_CODE;
 let DB = blankDB();   // real data loads asynchronously from IndexedDB at boot (see bottom)
-let ui = { tab:'games', gameId:null, scoreSide:'away', statScope:'career', statTeam:'all', statSort:{col:'avg',dir:-1}, statView:'batting' };
+let ui = { tab:'games', gameId:null, scoreSide:'away', book:'home', statScope:'career', statTeam:'all', statSort:{col:'avg',dir:-1}, statView:'batting' };
 
 function blankDB(){
-  return { meta:{league:'Church Softball', name:'League Scorebook', season:THIS_YEAR, leagueCode:''}, teams:[], players:[], games:[] };
+  return { meta:{league:'Softball League', name:'League Scorebook', season:THIS_YEAR, leagueCode:'', activeGameId:null}, teams:[], players:[], games:[] };
 }
 function migrate(d){
   d.teams=d.teams||[]; d.players=d.players||[]; d.games=d.games||[];
   d.meta=d.meta||{};
-  d.meta.league=d.meta.league||'Church Softball';
+  d.meta.league=d.meta.league||'Softball League';
   d.meta.name=d.meta.name||'League Scorebook';
   if(d.meta.season==null){ const ys=d.games.map(g=>g.year).filter(Boolean); d.meta.season=ys.length?Math.max(...ys):THIS_YEAR; }
   d.meta.leagueCode=d.meta.leagueCode||'';
+  if(d.meta.activeGameId===undefined) d.meta.activeGameId=null;
+  // ensure every game has two scorebooks (away keeper + home keeper)
+  d.games.forEach(g=>{
+    g.lineups=g.lineups||{away:[],home:[]};
+    if(!g.books){
+      const src=g.pa||{};
+      g.books={ away:{pa:JSON.parse(JSON.stringify(src))}, home:{pa:JSON.parse(JSON.stringify(src))} };
+      delete g.pa;
+    }
+    g.books.away=g.books.away||{pa:{}}; g.books.home=g.books.home||{pa:{}};
+    g.books.away.pa=g.books.away.pa||{}; g.books.home.pa=g.books.home.pa||{};
+  });
   return d;
 }
 
@@ -392,7 +421,10 @@ function cloudStatus(s){ cloud.status=s; const el=$('#cloudStatus'); if(el) el.t
 function dataWeight(d){
   if(!d) return 0;
   let w=(d.teams?d.teams.length:0)+(d.players?d.players.length:0)+(d.games?d.games.length:0);
-  (d.games||[]).forEach(g=>{ w+=Object.keys(g.pa||{}).length; });
+  (d.games||[]).forEach(g=>{
+    if(g.pa) w+=Object.keys(g.pa).length;                 // legacy single-book games
+    if(g.books){ ['away','home'].forEach(bk=>{ w+=Object.keys((g.books[bk]||{}).pa||{}).length; }); }
+  });
   return w;
 }
 async function initCloud(){
@@ -470,6 +502,13 @@ const $ = s => document.querySelector(s);
 const team = id => DB.teams.find(t=>t.id===id);
 const player = id => DB.players.find(p=>p.id===id);
 const game = id => DB.games.find(g=>g.id===id);
+/* ---- two independent scorebooks per game: the away keeper's and the home keeper's ---- */
+const BOOKS=['away','home'];
+const BOOK_LABEL={away:'Away keeper', home:'Home keeper'};
+function gpa(g, book){ if(!g||!g.books) return {}; const b=g.books[book]; return (b&&b.pa)||{}; }
+function paCount(g, book){ return Object.keys(gpa(g,book)).length; }
+function primaryBook(g){ return paCount(g,'home')>=paCount(g,'away') ? 'home' : 'away'; }
+function bothBooksActive(g){ return paCount(g,'home')>0 && paCount(g,'away')>0; }
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function initials(n){ if(!n) return '?'; const p=n.trim().split(/\s+/); return ((p[0]||'')[0]||'')+((p[1]||'')[0]||''); }
 function fmt3(x){ if(!isFinite(x)) return '.000'; return (x>=1? x.toFixed(3): x.toFixed(3).replace(/^0/,'')); }
@@ -487,7 +526,7 @@ $('#scrim').addEventListener('click',e=>{ if(e.target.id==='scrim') closeSheet()
 ============================================================ */
 function render(){
   $('#leagueName').textContent = DB.meta.name||'League Scorebook';
-  $('#leagueSub').textContent = DB.meta.league||'Church Softball';
+  $("#leagueSub").textContent = DB.meta.league||"Softball League";
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===ui.tab));
   const v=$('#view');
   if(ui.tab==='games') v.innerHTML=viewGames();
@@ -508,25 +547,48 @@ function viewGames(){
   h+=`<button class="btn block seam" onclick="newGameSheet()">＋ New Game</button>`;
   if(!DB.games.length){
     h+=`<div class="empty"><div class="big">⚾</div>No games yet.<br>Create one to start keeping score.</div>`;
-    if(!DB.teams.length) h+=`<div class="fab-note">Tip: add your teams & players in the <b>Teams</b> tab first.</div>`;
+    if(!DB.teams.length) h+=`<div class="fab-note">Tip: add your teams &amp; players in the <b>Teams</b> tab first.</div>`;
     return h;
   }
+
+  // featured: the one game that's open on the scorecard, shown bigger
+  const ag=game(DB.meta.activeGameId);
+  if(ag){
+    const aw=team(ag.away), hm=team(ag.home), s=gameScore(ag);
+    const diff = bothBooksActive(ag) && bookDiffs(ag).length;
+    h+=`<div class="section-eyebrow" style="margin-top:18px">On the scorecard</div>`;
+    h+=`<div class="card feat" onclick="openGame('${ag.id}')">
+      <div class="feat-status ${ag.final?'fin':''}">${esc(liveLabel(ag))}</div>
+      <div class="feat-body">
+        <div class="feat-team"><span class="ft-name">${esc(aw?aw.name:'Away')}</span><span class="ft-score mono">${s.away}</span></div>
+        <div class="feat-team"><span class="ft-name">${esc(hm?hm.name:'Home')}</span><span class="ft-score mono">${s.home}</span></div>
+      </div>
+      <div class="feat-foot">
+        <span class="tag">${esc(ag.date||'')}${ag.note?' · '+esc(ag.note):''}</span>
+        ${diff?`<span class="diff-chip">⚠ books disagree</span>`:''}
+        <span class="grow"></span><span class="btn sm">Resume →</span>
+      </div>
+    </div>`;
+  }
+
+  const rest=DB.games.filter(g=>g.id!==DB.meta.activeGameId);
   const byYear={};
-  DB.games.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')).forEach(g=>{ (byYear[g.year]=byYear[g.year]||[]).push(g); });
+  rest.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')).forEach(g=>{ (byYear[g.year]=byYear[g.year]||[]).push(g); });
   Object.keys(byYear).sort((a,b)=>b-a).forEach(y=>{
     h+=`<div class="section-eyebrow" style="margin-top:16px">${y} Season</div><div class="card">`;
     byYear[y].forEach(g=>{
-      const aw=team(g.away), hm=team(g.home);
-      const s=gameScore(g);
-      const done=g.final;
+      const aw=team(g.away), hm=team(g.home), s=gameScore(g);
+      const lbl=liveLabel(g);
+      const col = g.final?'var(--seam)':(lbl==='Not started'?'var(--ink-soft)':'var(--field)');
+      const diff = bothBooksActive(g) && bookDiffs(g).length;
       h+=`<div class="list-item" onclick="openGame('${g.id}')">
         <div class="grow">
           <div style="font-size:15px;font-weight:600;letter-spacing:.02em">${esc(aw?aw.name:'Away')} <span class="muted">@</span> ${esc(hm?hm.name:'Home')}</div>
-          <div class="tag">${esc(g.date||'')}${g.note?' · '+esc(g.note):''}</div>
+          <div class="tag">${esc(g.date||'')}${g.note?' · '+esc(g.note):''}${diff?' · ⚠':''}</div>
         </div>
         <div class="mono" style="text-align:right;font-size:15px;font-weight:700">
           ${s.away}<span class="muted">–</span>${s.home}
-          <div class="tag" style="color:${done?'var(--seam)':'var(--ink-soft)'}">${done?'FINAL':'in progress'}</div>
+          <div class="tag" style="color:${col}">${esc(lbl)}</div>
         </div>
       </div>`;
     });
@@ -556,7 +618,7 @@ function newGameSheet(){
 }
 function makeGame(date, year, away, home, note){
   const g={ id:uid('g'), date, year:parseInt(year)||curSeason(), away, home, note:(note||'').trim(),
-            final:false, lineups:{away:[],home:[]}, pa:{} };
+            final:false, lineups:{away:[],home:[]}, books:{ away:{pa:{}}, home:{pa:{}} } };
   ['away','home'].forEach(side=>{ const t=team(g[side]); if(t) g.lineups[side]=t.roster.slice(); });
   DB.games.push(g);
   return g;
@@ -567,7 +629,7 @@ function createGame(){
   const g=makeGame($('#ngDate').value, $('#ngYear').value, away, home, $('#ngNote').value);
   save(); closeSheet(); openGame(g.id);
 }
-function openGame(id){ ui.gameId=id; ui.scoreSide='away'; ui.tab='score'; render(); }
+function openGame(id){ ui.gameId=id; DB.meta.activeGameId=id; ui.scoreSide='away'; ui.tab='score'; saveLocal(); render(); }
 
 /* ============================================================
    SCOREBOOK
@@ -575,20 +637,27 @@ function openGame(id){ ui.gameId=id; ui.scoreSide='away'; ui.tab='score'; render
 const INN_MIN=7;
 function gameInnings(g){
   let mx=INN_MIN;
-  Object.keys(g.pa).forEach(k=>{ const inn=parseInt(k.split('|')[2]); if(inn>mx) mx=inn; });
-  return mx;
+  BOOKS.forEach(bk=>{ Object.keys(gpa(g,bk)).forEach(k=>{ const inn=parseInt(k.split('|')[2]); if(inn>mx) mx=inn; }); });
+  return Math.max(mx, g._innings||INN_MIN);
 }
 function paKey(side,pid,inn){ return side+'|'+pid+'|'+inn; }
 
 function viewScore(){
+  ui.gameId = DB.meta.activeGameId;            // only the active game is in the scorecard
   const g=game(ui.gameId);
-  if(!g){ return `<div class="empty"><div class="big">📖</div>No game open.<br>Pick one from the <b>Games</b> tab.</div>`; }
+  if(!g){ return `<div class="empty"><div class="big">📖</div>No game open.<br>Open one from the <b>Games</b> tab to score it.</div>`; }
   const aw=team(g.away), hm=team(g.home);
   const side=ui.scoreSide;
+  const book=ui.book;
+  const pm=gpa(g,book);                          // the book we're editing/showing
   const battingTeam = side==='away'?aw:hm;
   const lineup=g.lineups[side];
   const innings=gameInnings(g);
-  const sc=gameScore(g);
+  const sc=gameScore(g,pm);
+
+  // discrepancy detection between the two keepers' books
+  const diffs = bothBooksActive(g) ? bookDiffs(g) : [];
+  const diffSet = new Set(diffs.map(d=>d.bat+'|'+d.inn));
 
   let h=`<div class="sb-head">
     <button class="btn sm ghost" onclick="ui.tab='games';render()">‹ Games</button>
@@ -596,18 +665,34 @@ function viewScore(){
     <button class="btn sm" onclick="gameMenu()">⋯</button>
   </div>`;
 
-  // linescore
+  // book selector — one place for the home keeper's card and the away keeper's card
+  h+=`<div class="row" style="margin-bottom:8px;align-items:center;gap:8px">
+    <span class="tag" style="white-space:nowrap">Scorebook:</span>
+    <div class="teamtoggle grow" style="justify-content:center">
+      <button class="${book==='away'?'active':''}" onclick="setBook('away')">Away keeper${paCount(g,'away')?'':' ·'}</button>
+      <button class="${book==='home'?'active':''}" onclick="setBook('home')">Home keeper${paCount(g,'home')?'':' ·'}</button>
+    </div></div>`;
+
+  // discrepancy banner
+  if(diffs.length){
+    const list=diffs.slice(0,6).map(d=>`${d.bat==='away'?(aw?aw.name:'Away'):(hm?hm.name:'Home')} ${ORD_INN(d.inn)} (away book ${d.a}, home book ${d.hh})`).join('; ');
+    h+=`<div class="discrep">⚠ The two scorebooks disagree — ${esc(list)}${diffs.length>6?'…':''}. Compare and fix who’s right.</div>`;
+  } else if(bothBooksActive(g)){
+    h+=`<div class="agree">✓ Both scorebooks agree.</div>`;
+  }
+
+  // linescore (reflects the selected book; cells that disagree with the other book are flagged)
   h+=`<table class="linescore mono"><thead><tr><th style="text-align:left;padding-left:8px">Team</th>`;
   for(let i=1;i<=innings;i++) h+=`<th>${i}</th>`;
   h+=`<th class="rhe">R</th><th class="rhe">H</th></tr></thead><tbody>`;
   [['away',aw],['home',hm]].forEach(([s,t])=>{
     h+=`<tr><td class="tm">${esc(t?t.name:s)}</td>`;
-    for(let i=1;i<=innings;i++){ const r=inningRuns(g,s,i); h+=`<td>${r||''}</td>`; }
-    h+=`<td class="rhe">${sc[s]}</td><td class="rhe">${teamHits(g,s)}</td></tr>`;
+    for(let i=1;i<=innings;i++){ const r=inningRuns(g,s,i,pm); const bad=diffSet.has(s+'|'+i); h+=`<td class="${bad?'cell-diff':''}">${r||''}</td>`; }
+    h+=`<td class="rhe">${sc[s]}</td><td class="rhe">${teamHits(g,s,pm)}</td></tr>`;
   });
   h+=`</tbody></table>`;
 
-  // team toggle
+  // batting-team toggle
   h+=`<div class="row" style="margin-bottom:10px;justify-content:center">
     <div class="teamtoggle">
       <button class="${side==='away'?'active':''}" onclick="setSide('away')">${esc(aw?aw.name:'Away')}</button>
@@ -626,37 +711,46 @@ function viewScore(){
   for(let i=1;i<=innings;i++) h+=`<th class="col-inn">${i}</th>`;
   h+=`<th class="col-stat">AB</th><th class="col-stat">R</th><th class="col-stat">H</th><th class="col-stat">RBI</th></tr></thead><tbody>`;
 
-  // precompute out-order per inning
-  const outOrder=computeOutOrder(g,side,lineup,innings);
+  const outOrder=computeOutOrder(g,side,lineup,innings,pm);
 
   lineup.forEach((pid,idx)=>{
     const p=player(pid);
-    const line=playerGameLine(g,side,pid);
+    const line=playerGameLine(g,side,pid,pm);
     h+=`<tr><td class="ordercell">${idx+1}</td>
       <td class="namecell"><div class="nm">${esc(p?p.name:'—')}</div><div class="pos">${esc(p&&p.pos?p.pos:(p&&p.num?'#'+p.num:''))}</div></td>`;
     for(let i=1;i<=innings;i++){
-      const pa=g.pa[paKey(side,pid,i)];
+      const pa=pm[paKey(side,pid,i)];
       h+=`<td><button class="cellbtn" onclick="openPA('${side}','${pid}',${i})">${cellSVG(pa)}${cellBadges(pa,outOrder[paKey(side,pid,i)])}</button></td>`;
     }
     h+=`<td class="statcell mono">${line.ab}</td><td class="statcell mono">${line.r}</td><td class="statcell mono">${line.h}</td><td class="statcell mono">${line.rbi}</td></tr>`;
   });
   h+=`</tbody><tfoot><tr><td class="lbl" colspan="2">Runs</td>`;
-  for(let i=1;i<=innings;i++) h+=`<td>${inningRuns(g,side,i)||''}</td>`;
-  const tot=teamLine(g,side);
+  for(let i=1;i<=innings;i++) h+=`<td>${inningRuns(g,side,i,pm)||''}</td>`;
+  const tot=teamLine(g,side,pm);
   h+=`<td>${tot.ab}</td><td>${tot.r}</td><td>${tot.h}</td><td>${tot.rbi}</td></tr></tfoot></table></div>`;
 
   h+=`<div class="row addbat" style="gap:8px">
     <button class="btn sm ghost grow" onclick="editLineup('${side}')">Edit lineup</button>
     <button class="btn sm ghost grow" onclick="addInning('${ui.gameId}')">＋ Inning</button>
   </div>`;
-  h+=`<div class="fab-note">Tap any box to record the play. Tap a base in the diamond to advance the runner; tap home to score.</div>`;
+  h+=`<div class="fab-note">You’re keeping the <b>${BOOK_LABEL[book]}</b> book. Tap any box to record the play; tap a base to advance the runner, home to score.</div>`;
   return h;
 }
+function setBook(b){ ui.book=b; render(); }
+// runs the two books disagree on, per team per inning
+function bookDiffs(g){
+  const pmA=gpa(g,'away'), pmH=gpa(g,'home'); const innings=gameInnings(g); const out=[];
+  ['away','home'].forEach(bat=>{
+    for(let i=1;i<=innings;i++){
+      const a=inningRuns(g,bat,i,pmA), hh=inningRuns(g,bat,i,pmH);
+      if(a!==hh) out.push({bat,inn:i,a,hh});
+    }
+  });
+  return out;
+}
+function ORD_INN(n){ const s=['th','st','nd','rd'], v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); }
 function setSide(s){ ui.scoreSide=s; render(); }
 function addInning(gid){ const g=game(gid); const next=gameInnings(g)+1; g._innings=Math.max(g._innings||INN_MIN, next); save(); render(); }
-// extend gameInnings to honor _innings
-const _gameInnings = gameInnings;
-gameInnings = function(g){ return Math.max(_gameInnings(g), g._innings||INN_MIN); };
 
 /* ----- diamond SVG for a recorded PA ----- */
 function cellSVG(pa){
@@ -696,12 +790,13 @@ function cellBadges(pa,outNo){
   if(pa && pa.rbi>0) h+=`<span class="rbidot">${pa.rbi}rbi</span>`;
   return h;
 }
-function computeOutOrder(g,side,lineup,innings){
+function computeOutOrder(g,side,lineup,innings,pm){
+  pm=pm||gpa(g,primaryBook(g));
   const map={};
   for(let i=1;i<=innings;i++){
     let outs=0;
     lineup.forEach(pid=>{
-      const pa=g.pa[paKey(side,pid,i)];
+      const pa=pm[paKey(side,pid,i)];
       if(pa && RESULTS[pa.result] && RESULTS[pa.result].out){ outs++; map[paKey(side,pid,i)]=outs; }
     });
   }
@@ -711,13 +806,14 @@ function computeOutOrder(g,side,lineup,innings){
 /* ----- PA editor sheet ----- */
 let paDraft=null;
 // runners currently on base in this inning (batters ahead in the order who reached and aren't out)
-function onBaseRunners(g, side, inning, currentPid){
+function onBaseRunners(g, side, inning, currentPid, pm){
+  pm=pm||gpa(g,ui.book);
   const lineup=g.lineups[side];
   const ci=lineup.indexOf(currentPid);
   const out=[];
   lineup.forEach((pid,idx)=>{
     if(idx>=ci) return;                 // only batters ahead of the current one
-    const pa=g.pa[paKey(side,pid,inning)];
+    const pa=pm[paKey(side,pid,inning)];
     if(!pa) return;
     const def=RESULTS[pa.result];
     if(!def || def.out) return;         // outs aren't base runners
@@ -732,12 +828,13 @@ function recomputeRBI(){
 }
 function openPA(side,pid,inn){
   const g=game(ui.gameId);
-  const existing=g.pa[paKey(side,pid,inn)];
+  const pm=gpa(g,ui.book);
+  const existing=pm[paKey(side,pid,inn)];
   paDraft = existing? JSON.parse(JSON.stringify(existing)) : { result:null, bases:0, scored:false, rbi:0, notation:'' };
   paDraft._side=side; paDraft._pid=pid; paDraft._inn=inn;
   // reflect each on-base runner's current scored state so the panel pre-fills correctly
   paDraft._runnerSet={};
-  onBaseRunners(g,side,inn,pid).forEach(r=>{ paDraft._runnerSet[r.pid]=r.scored; });
+  onBaseRunners(g,side,inn,pid,pm).forEach(r=>{ paDraft._runnerSet[r.pid]=r.scored; });
   renderPASheet();
 }
 function renderPASheet(){
@@ -797,7 +894,7 @@ function pickResult(r){
   // suggest which runners scored, based on the kind of hit (user confirms/adjusts)
   const g=game(ui.gameId);
   paDraft._runnerSet={};
-  onBaseRunners(g,paDraft._side,paDraft._inn,paDraft._pid).forEach(rr=>{
+  onBaseRunners(g,paDraft._side,paDraft._inn,paDraft._pid,gpa(g,ui.book)).forEach(rr=>{
     let s=false;
     if(r==='HR'||r==='3B') s=true;                 // clears the bases
     else if(r==='2B') s = rr.bases>=2;             // 2nd/3rd typically score
@@ -841,13 +938,14 @@ function setNote(c){ paDraft.notation=c; const ni=$('#paNote'); if(ni) ni.value=
 function savePA(){
   if(!paDraft.result){ toast('Pick a result'); return; }
   const g=game(ui.gameId);
+  const pm=gpa(g,ui.book);
   const k=paKey(paDraft._side,paDraft._pid,paDraft._inn);
-  g.pa[k]={ result:paDraft.result, bases:paDraft.bases, scored:paDraft.scored, rbi:paDraft.rbi, notation:paDraft.notation.trim() };
-  // apply who-scored decisions to the runners' own cells
+  pm[k]={ result:paDraft.result, bases:paDraft.bases, scored:paDraft.scored, rbi:paDraft.rbi, notation:paDraft.notation.trim() };
+  // apply who-scored decisions to the runners' own cells (same book)
   let scoredNames=[];
   Object.keys(paDraft._runnerSet||{}).forEach(pid=>{
     const rk=paKey(paDraft._side,pid,paDraft._inn);
-    const rpa=g.pa[rk]; if(!rpa) return;
+    const rpa=pm[rk]; if(!rpa) return;
     const want=!!paDraft._runnerSet[pid];
     if(rpa.scored!==want){
       rpa.scored=want;
@@ -859,7 +957,7 @@ function savePA(){
 }
 function clearPA(){
   const g=game(ui.gameId);
-  delete g.pa[paKey(paDraft._side,paDraft._pid,paDraft._inn)];
+  delete gpa(g,ui.book)[paKey(paDraft._side,paDraft._pid,paDraft._inn)];
   save(); closeSheet(); render();
 }
 
@@ -878,6 +976,7 @@ function gameMenu(){
 function toggleFinal(){ const g=game(ui.gameId); g.final=!g.final; save(); closeSheet(); render(); toast(g.final?'Game marked final':'Reopened'); }
 function deleteGame(){
   if(!confirm('Delete this game and its scoring? Stats from it will be removed.')) return;
+  if(DB.meta.activeGameId===ui.gameId) DB.meta.activeGameId=null;
   DB.games=DB.games.filter(x=>x.id!==ui.gameId); save(); closeSheet(); ui.tab='games'; render();
 }
 
@@ -944,24 +1043,53 @@ function applyPA(line,pa){
   line.rbi+=pa.rbi||0;
   if(pa.scored)line.r++;
 }
-function playerGameLine(g,side,pid){
+// pm = a book's pa map. Defaults to the game's primary (fuller) book.
+function playerGameLine(g,side,pid,pm){
+  pm=pm||gpa(g,primaryBook(g));
   const line=emptyLine();
-  Object.keys(g.pa).forEach(k=>{ const [s,p,inn]=k.split('|'); if(s===side&&p===pid){ applyPA(line,g.pa[k]); } });
+  Object.keys(pm).forEach(k=>{ const [s,p]=k.split('|'); if(s===side&&p===pid){ applyPA(line,pm[k]); } });
   return line;
 }
-function teamLine(g,side){
+function teamLine(g,side,pm){
+  pm=pm||gpa(g,primaryBook(g));
   const line=emptyLine();
-  g.lineups[side].forEach(pid=>{ const l=playerGameLine(g,side,pid); for(const kk in line) if(kk!=='g') line[kk]+=l[kk]; });
+  g.lineups[side].forEach(pid=>{ const l=playerGameLine(g,side,pid,pm); for(const kk in line) if(kk!=='g') line[kk]+=l[kk]; });
   return line;
 }
-function inningRuns(g,side,inn){
+function inningRuns(g,side,inn,pm){
+  pm=pm||gpa(g,primaryBook(g));
   let r=0;
-  g.lineups[side].forEach(pid=>{ const pa=g.pa[paKey(side,pid,inn)]; if(pa&&pa.scored)r++; });
+  g.lineups[side].forEach(pid=>{ const pa=pm[paKey(side,pid,inn)]; if(pa&&pa.scored)r++; });
   return r;
 }
-function teamHits(g,side){ return teamLine(g,side).h; }
-function gameScore(g){ return { away:teamScoreRuns(g,'away'), home:teamScoreRuns(g,'home') }; }
-function teamScoreRuns(g,side){ let r=0; const innings=gameInnings(g); for(let i=1;i<=innings;i++) r+=inningRuns(g,side,i); return r; }
+function teamHits(g,side,pm){ return teamLine(g,side,pm).h; }
+function gameScore(g,pm){ pm=pm||gpa(g,primaryBook(g)); return { away:teamScoreRuns(g,'away',pm), home:teamScoreRuns(g,'home',pm) }; }
+function teamScoreRuns(g,side,pm){ pm=pm||gpa(g,primaryBook(g)); let r=0; const innings=gameInnings(g); for(let i=1;i<=innings;i++) r+=inningRuns(g,side,i,pm); return r; }
+
+// live game state from the primary book: which inning, top/bottom, how many outs
+function liveState(g){
+  const pm=gpa(g,primaryBook(g));
+  const innings=gameInnings(g);
+  const has=(side,inn)=> g.lineups[side].some(pid=> pm[paKey(side,pid,inn)]);
+  const outsIn=(side,inn)=>{ let o=0; g.lineups[side].forEach(pid=>{ const pa=pm[paKey(side,pid,inn)]; if(pa&&RESULTS[pa.result]&&RESULTS[pa.result].out)o++; }); return o; };
+  let started=false;
+  for(let i=1;i<=innings;i++){ if(has('away',i)||has('home',i)){ started=true; break; } }
+  if(!started) return {started:false};
+  let inn=1, half='top';
+  for(let i=innings;i>=1;i--){
+    if(has('home',i)){ inn=i; half='bot'; break; }
+    if(has('away',i)){ inn=i; half='top'; break; }
+  }
+  let outs=outsIn(half==='top'?'away':'home', inn);
+  if(outs>=3){ if(half==='top'){ half='bot'; } else { half='top'; inn++; } outs=0; }
+  return {started:true, inning:inn, half, outs:Math.min(outs,3)};
+}
+function liveLabel(g){
+  if(g.final) return 'FINAL';
+  const s=liveState(g);
+  if(!s.started) return 'Not started';
+  return (s.half==='top'?'Top ':'Bot ')+s.inning+' · '+s.outs+' out'+(s.outs===1?'':'s');
+}
 
 // derived
 function avg(l){ return l.ab? l.h/l.ab : 0; }
@@ -969,15 +1097,16 @@ function obp(l){ const d=l.ab+l.bb+l.hbp+l.sf; return d? (l.h+l.bb+l.hbp)/d : 0;
 function slg(l){ return l.ab? l.tb/l.ab : 0; }
 function ops(l){ return obp(l)+slg(l); }
 
-/* aggregate a player's line across scope */
+/* aggregate a player's line across scope (uses each game's primary book) */
 function aggregate(pid, scope, teamFilter){
   const line=emptyLine();
   DB.games.forEach(g=>{
     if(scope!=='career' && g.year!=scope) return;
+    const pm=gpa(g,primaryBook(g));
     ['away','home'].forEach(side=>{
       if(teamFilter!=='all' && g[side]!==teamFilter) return;
       if(!g.lineups[side].includes(pid)) return;
-      const l=playerGameLine(g,side,pid);
+      const l=playerGameLine(g,side,pid,pm);
       const played = (l.ab+l.bb+l.hbp+l.sf)>0 || g.lineups[side].includes(pid);
       if(played){ line.g++; for(const kk in line) if(kk!=='g') line[kk]+=l[kk]; }
     });
@@ -1112,7 +1241,7 @@ function viewRoster(){
 }
 function addTeamSheet(){
   openSheet(`<h2>New Team</h2><div class="sh-sub">Add a team to your league.</div>
-    <label class="field"><span>Team name</span><input class="inp" id="tName" placeholder="e.g. First Baptist Flames"></label>
+    <label class="field"><span>Team name</span><input class="inp" id="tName" placeholder="e.g. Wildcats"></label>
     <div class="sheet-actions"><button class="btn ghost grow" onclick="closeSheet()">Cancel</button>
     <button class="btn seam grow" onclick="commitTeam()">Add team</button></div>`);
   setTimeout(()=>$('#tName')?.focus(),60);
@@ -1162,7 +1291,7 @@ function deletePlayer(pid){
   if(!confirm('Delete this player? Their stats and any scoring tied to them will be lost.')) return;
   const p=player(pid); const t=team(p.teamId); if(t) t.roster=t.roster.filter(x=>x!==pid);
   DB.players=DB.players.filter(x=>x.id!==pid);
-  DB.games.forEach(g=>{ ['away','home'].forEach(s=>{ g.lineups[s]=g.lineups[s].filter(x=>x!==pid); }); Object.keys(g.pa).forEach(k=>{ if(k.split('|')[1]===pid) delete g.pa[k]; }); });
+  DB.games.forEach(g=>{ ['away','home'].forEach(s=>{ g.lineups[s]=g.lineups[s].filter(x=>x!==pid); }); BOOKS.forEach(bk=>{ const pm=gpa(g,bk); Object.keys(pm).forEach(k=>{ if(k.split('|')[1]===pid) delete pm[k]; }); }); });
   save(); closeSheet(); render();
 }
 
@@ -1268,8 +1397,9 @@ function addScheduled(){
 }
 function deleteScheduled(id){
   const g=game(id);
-  const hasScore=g && Object.keys(g.pa).length;
+  const hasScore=g && (paCount(g,'away')+paCount(g,'home'))>0;
   if(hasScore && !confirm('This game has scoring recorded. Delete it anyway?')) return;
+  if(DB.meta.activeGameId===id) DB.meta.activeGameId=null;
   DB.games=DB.games.filter(x=>x.id!==id); save(); openSettings();
 }
 function genRoundRobin(){
