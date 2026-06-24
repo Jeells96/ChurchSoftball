@@ -337,15 +337,11 @@ const KEY='softball_scorebook_v1';
 const THIS_YEAR=new Date().getFullYear();
 const DEFAULT_LEAGUE_CODE='church-softball-main';   // fixed shared doc — sync just works, no setup
 const syncCode = () => (DB.meta.leagueCode && DB.meta.leagueCode.trim()) || DEFAULT_LEAGUE_CODE;
-let DB = load();
+let DB = blankDB();   // real data loads asynchronously from IndexedDB at boot (see bottom)
 let ui = { tab:'games', gameId:null, scoreSide:'away', statScope:'career', statTeam:'all', statSort:{col:'avg',dir:-1}, statView:'batting' };
 
 function blankDB(){
   return { meta:{league:'Church Softball', name:'League Scorebook', season:THIS_YEAR, leagueCode:''}, teams:[], players:[], games:[] };
-}
-function load(){
-  try{ const r=localStorage.getItem(KEY); if(r) return migrate(JSON.parse(r)); }catch(e){}
-  return blankDB();
 }
 function migrate(d){
   d.teams=d.teams||[]; d.players=d.players||[]; d.games=d.games||[];
@@ -356,7 +352,31 @@ function migrate(d){
   d.meta.leagueCode=d.meta.leagueCode||'';
   return d;
 }
-function saveLocal(){ try{ localStorage.setItem(KEY, JSON.stringify(DB)); }catch(e){ toast('Storage full — export a backup'); } }
+
+/* ---------- Local cache: IndexedDB (big quota) with localStorage fallback ---------- */
+const IDB_NAME='scorebook_idb', IDB_STORE='kv';
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    let r; try{ r=indexedDB.open(IDB_NAME,1); }catch(e){ return rej(e); }
+    r.onupgradeneeded=()=>{ try{ r.result.createObjectStore(IDB_STORE); }catch(e){} };
+    r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);
+  });
+}
+function idbGet(k){ return idbOpen().then(db=>new Promise((res,rej)=>{ const t=db.transaction(IDB_STORE,'readonly').objectStore(IDB_STORE).get(k); t.onsuccess=()=>res(t.result); t.onerror=()=>rej(t.error); })); }
+function idbSet(k,v){ return idbOpen().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(IDB_STORE,'readwrite'); tx.objectStore(IDB_STORE).put(v,k); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); })); }
+
+let lsOk=true;            // becomes false once localStorage is full, so we stop retrying it
+async function loadLocalAsync(){
+  try{ const v=await idbGet(KEY); if(v) return migrate(typeof v==='string'?JSON.parse(v):v); }catch(e){ console.warn('[idb get]',e); }
+  // one-time migration of data saved by the older localStorage version
+  try{ const r=localStorage.getItem(KEY); if(r){ const d=migrate(JSON.parse(r)); idbSet(KEY, JSON.stringify(d)).catch(()=>{}); return d; } }catch(e){}
+  return blankDB();
+}
+function saveLocal(){
+  const s=JSON.stringify(DB);
+  idbSet(KEY, s).catch(e=>console.warn('[idb set]',e));   // primary cache — large quota
+  if(lsOk){ try{ localStorage.setItem(KEY, s); }catch(e){ lsOk=false; } } // best-effort mirror; quietly stop if full
+}
 function save(){ saveLocal(); if(cloud.on && !cloud.applyingRemote) pushCloud(); }
 const uid = p => (p||'id')+Math.random().toString(36).slice(2,9);
 const curSeason = () => DB.meta.season || THIS_YEAR;
@@ -690,12 +710,34 @@ function computeOutOrder(g,side,lineup,innings){
 
 /* ----- PA editor sheet ----- */
 let paDraft=null;
+// runners currently on base in this inning (batters ahead in the order who reached and aren't out)
+function onBaseRunners(g, side, inning, currentPid){
+  const lineup=g.lineups[side];
+  const ci=lineup.indexOf(currentPid);
+  const out=[];
+  lineup.forEach((pid,idx)=>{
+    if(idx>=ci) return;                 // only batters ahead of the current one
+    const pa=g.pa[paKey(side,pid,inning)];
+    if(!pa) return;
+    const def=RESULTS[pa.result];
+    if(!def || def.out) return;         // outs aren't base runners
+    out.push({ pid, name:(player(pid)||{}).name||'—', bases:pa.bases, scored:!!pa.scored });
+  });
+  return out;
+}
+const ORD=n=>({1:'1st',2:'2nd',3:'3rd',4:'home'}[n]||n+'');
+function recomputeRBI(){
+  const scored=Object.values(paDraft._runnerSet||{}).filter(Boolean).length;
+  paDraft.rbi = scored + (paDraft.result==='HR'?1:0);
+}
 function openPA(side,pid,inn){
   const g=game(ui.gameId);
-  const p=player(pid);
   const existing=g.pa[paKey(side,pid,inn)];
   paDraft = existing? JSON.parse(JSON.stringify(existing)) : { result:null, bases:0, scored:false, rbi:0, notation:'' };
   paDraft._side=side; paDraft._pid=pid; paDraft._inn=inn;
+  // reflect each on-base runner's current scored state so the panel pre-fills correctly
+  paDraft._runnerSet={};
+  onBaseRunners(g,side,inn,pid).forEach(r=>{ paDraft._runnerSet[r.pid]=r.scored; });
   renderPASheet();
 }
 function renderPASheet(){
@@ -716,8 +758,24 @@ function renderPASheet(){
       <div class="de-side">
         <div class="tag" style="margin-bottom:6px">RBI</div>
         <div class="stepper"><button onclick="bumpRBI(-1)">–</button><div class="val mono">${d.rbi}</div><button onclick="bumpRBI(1)">＋</button></div>
-        <div class="hint">Tap a base to mark how far the runner got. Tap home plate to score the run.</div>
+        <div class="hint">Tap a base to mark how far ${esc((p&&p.name||'the batter').split(' ')[0])} got. Tap home to score.</div>
       </div></div>`;
+
+    // who scored on this play?
+    const g0=game(ui.gameId);
+    const onBase=onBaseRunners(g0,d._side,d._inn,d._pid);
+    if(onBase.length){
+      h+=`<div class="group-label">Runners on base — who scored?</div>`;
+      h+=`<div class="card" style="margin-bottom:2px">`;
+      onBase.forEach(r=>{
+        const on=!!d._runnerSet[r.pid];
+        h+=`<div class="list-item" style="padding:11px 12px" onclick="toggleRunner('${r.pid}')">
+          <div class="grow"><div style="font-weight:600">${esc(r.name)}</div><div class="tag">was on ${ORD(r.bases)}</div></div>
+          <div class="opt ${on?'sel':''}" style="min-width:84px;pointer-events:none">${on?'Scored ✓':'No'}</div>
+        </div>`;
+      });
+      h+=`</div><div class="hint">Tap a runner to toggle whether they scored on this play. RBIs update automatically.</div>`;
+    }
 
     h+=`<div class="notation-row"><input class="inp mono" id="paNote" value="${esc(d.notation)}" placeholder="${RESULTS[d.result].lbl}  (e.g. 6-3, F8)"></div>`;
     h+=`<div class="chiprow">`+NOTATION_CHIPS.map(c=>`<button class="chip" onclick="setNote('${c}')">${c}</button>`).join('')+`</div>`;
@@ -734,9 +792,25 @@ function pickResult(r){
   paDraft.result=r;
   paDraft.bases=def.bases;
   paDraft.scored=!!def.autoScore;
-  if(r==='HR'){ paDraft.rbi=Math.max(paDraft.rbi,1); }
   if(def.out){ paDraft.bases=0; paDraft.scored=false; }
   if(!paDraft.notation || Object.values(RESULTS).some(x=>x.lbl===paDraft.notation)) paDraft.notation='';
+  // suggest which runners scored, based on the kind of hit (user confirms/adjusts)
+  const g=game(ui.gameId);
+  paDraft._runnerSet={};
+  onBaseRunners(g,paDraft._side,paDraft._inn,paDraft._pid).forEach(rr=>{
+    let s=false;
+    if(r==='HR'||r==='3B') s=true;                 // clears the bases
+    else if(r==='2B') s = rr.bases>=2;             // 2nd/3rd typically score
+    else if(r==='1B'||r==='ROE'||r==='FC') s = rr.bases>=3; // runner on 3rd scores
+    else if(r==='SF') s = rr.bases>=3;             // sac fly scores from 3rd
+    paDraft._runnerSet[rr.pid]=s;
+  });
+  recomputeRBI();
+  renderPASheet();
+}
+function toggleRunner(pid){
+  paDraft._runnerSet[pid]=!paDraft._runnerSet[pid];
+  recomputeRBI();
   renderPASheet();
 }
 function diamondEditSVG(d){
@@ -769,7 +843,19 @@ function savePA(){
   const g=game(ui.gameId);
   const k=paKey(paDraft._side,paDraft._pid,paDraft._inn);
   g.pa[k]={ result:paDraft.result, bases:paDraft.bases, scored:paDraft.scored, rbi:paDraft.rbi, notation:paDraft.notation.trim() };
+  // apply who-scored decisions to the runners' own cells
+  let scoredNames=[];
+  Object.keys(paDraft._runnerSet||{}).forEach(pid=>{
+    const rk=paKey(paDraft._side,pid,paDraft._inn);
+    const rpa=g.pa[rk]; if(!rpa) return;
+    const want=!!paDraft._runnerSet[pid];
+    if(rpa.scored!==want){
+      rpa.scored=want;
+      if(want){ rpa.bases=4; const nm=(player(pid)||{}).name; if(nm) scoredNames.push(nm.split(' ')[0]); }
+    }
+  });
   save(); closeSheet(); render();
+  if(scoredNames.length) toast(scoredNames.join(' & ')+' scored');
 }
 function clearPA(){
   const g=game(ui.gameId);
@@ -1232,8 +1318,11 @@ function download(name,text){
 }
 
 /* ---------- boot ---------- */
-render();
-if(cloudConfigured()) initCloud();   // auto-sync, no setup needed
+(async function boot(){
+  DB = await loadLocalAsync();
+  render();
+  if(cloudConfigured()) initCloud();   // auto-sync, no setup needed
+})();
 </script>
 </body>
 </html>
